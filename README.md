@@ -19,7 +19,7 @@ Estructura del repositorio:
 """
 
 # =================================================================
-# TEXTO PARA LA TESIS (descripción de cada módulo)
+# Descripción de cada módulo
 # =================================================================
 
 DESCRIPCION_MODULOS = """
