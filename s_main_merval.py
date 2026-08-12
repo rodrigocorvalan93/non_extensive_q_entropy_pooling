@@ -28,6 +28,7 @@ Tipos de retornos soportados:
 
 Requisitos:
   - entropy_pooling_v2.py, views_config.py, models.py (mismo directorio)
+  - covariance_estimation.py (estimación robusta para paneles desbalanceados)
   - input_mkt_px.xlsx (precios históricos)
   - input_mkt_w.xlsx (weights del Merval)
 
@@ -59,6 +60,13 @@ from models import (
     run_black_litterman, run_entropy_pooling, run_q_tsallis_ep,
     print_model_comparison, plot_model_comparison, ModelResult,
 )
+from covariance_estimation import (
+    prepare_prices,
+    estimate_covariance,
+    compute_returns_robust,
+    prepare_data_for_ep,
+    get_panel_diagnostics,
+)
 
 # ═══════════════════════════════════════════════════════════════
 # 1. CONFIGURACIÓN
@@ -70,12 +78,28 @@ CONFIDENCE = 0.5
 MAX_WEIGHT = 0.30     # Máximo 30% por activo (límite de concentración común en FCIs argentinos)
 RETURN_TYPE = "both"   # "log", "simple", "delta", "both"
 
+# ── Parámetros de estimación robusta ──
+MAX_GAP_FILL = 5       # Máximo de días consecutivos sin operar que se rellenan
+MIN_OBS_PAIRWISE = 60  # Mínimo de observaciones solapadas para estimar covarianza pairwise
+
 
 # ═══════════════════════════════════════════════════════════════
 # 2. CARGA DE DATOS
 # ═══════════════════════════════════════════════════════════════
 
 def load_data(prices_path, weights_path):
+    """
+    Carga precios y weights del benchmark.
+
+    A diferencia de la versión anterior, NO rellena NaN de inicio de serie.
+    Solo limpia huecos cortos (días sin operar). Los papeles nuevos con
+    menos historia mantienen sus NaN al inicio.
+
+    El manejo robusto de NaN se delega a covariance_estimation.py:
+      - prepare_prices() rellena solo huecos cortos
+      - estimate_covariance() estima pairwise si hay NaN
+      - prepare_data_for_ep() recorta filas para EP
+    """
     ext = Path(prices_path).suffix.lower()
     if ext in (".xlsx", ".xls"):
         prices = pd.read_excel(prices_path, index_col=0, parse_dates=True)
@@ -100,17 +124,12 @@ def load_data(prices_path, weights_path):
     w_mkt = np.array([weights_dict[t] for t in tickers])
     w_mkt = w_mkt / w_mkt.sum()
 
-    null_count = prices.isnull().sum().sum()
-    if null_count > 0:
-        print(f"  Interpolando {null_count} valores nulos...")
-        prices = prices.interpolate(method="linear").ffill().bfill()
-
     return prices, tickers, w_mkt
 
 
 def compute_returns(prices, method="log"):
     """
-    Calcula retornos.
+    Calcula retornos (versión legacy, para el caso sin NaN).
       log   : ln(Pt/Pt-1)
       simple: (Pt-Pt-1)/Pt-1
       delta : Yt - Yt-1 (para yields de bonos)
@@ -180,26 +199,50 @@ def define_pm_views():
 # ═══════════════════════════════════════════════════════════════
 
 def run_pipeline(prices, tickers, w_mkt, views, return_method="log", max_weight=1.0):
+    """
+    Pipeline principal: estima modelos BL, EP-Shannon y q-Tsallis-EP.
+
+    Manejo de paneles desbalanceados:
+      - Σ para BL se estima con toda la información pairwise disponible
+        (no se pierde historia de los activos viejos).
+      - X y p para EP usan solo las filas completas (EP necesita escenarios
+        sin NaN), pero Σ sigue usando la estimación pairwise completa.
+    """
     N = len(tickers)
-    returns = compute_returns(prices, method=return_method)
+
+    # ── Calcular retornos (preservando NaN de inicio) ──
+    returns = compute_returns_robust(
+        prices, method=return_method,
+        max_gap_fill=MAX_GAP_FILL, verbose=True,
+    )
     print(f"\n  Retornos ({return_method}): {returns.shape[0]} obs × {returns.shape[1]} activos")
     print(f"  Período: {returns.index[0].date()} → {returns.index[-1].date()}")
 
-    X = returns.values
+    # ── Estimar Σ (pairwise si hay NaN, estándar si no) ──
+    Sigma = estimate_covariance(
+        returns, min_obs_pairwise=MIN_OBS_PAIRWISE, verbose=True,
+    )
+    Sigma = 0.5 * (Sigma + Sigma.T)  # simetría numérica extra
+
+    # ── Preparar X y p para Entropy Pooling ──
+    # EP requiere escenarios completos (sin NaN), así que usamos solo
+    # las filas donde todos los activos tienen dato.
+    X, p = prepare_data_for_ep(returns, verbose=True)
     J = X.shape[0]
-    p = np.full(J, 1.0 / J)
 
-    Sigma = np.cov(X.T, ddof=1)
-    Sigma = 0.5 * (Sigma + Sigma.T)
-
-    mu_prior = X.T @ p
+    # ── Prior: media usando toda la historia individual de cada activo ──
+    mu_prior = np.array([
+        returns.iloc[:, i].dropna().mean() for i in range(N)
+    ])
     vol_prior = np.sqrt(np.diag(Sigma))
+
     print(f"\n  Estadísticas del prior (% diario):")
-    print(f"  {'Ticker':<8s}  {'E[R]':>8s}  {'Vol':>8s}  {'Sharpe':>8s}")
-    print(f"  {'-'*36}")
+    print(f"  {'Ticker':<8s}  {'E[R]':>8s}  {'Vol':>8s}  {'Sharpe':>8s}  {'Obs':>6s}")
+    print(f"  {'-'*44}")
     for i, t in enumerate(tickers):
+        n_obs_i = returns.iloc[:, i].dropna().shape[0]
         sr = mu_prior[i] / vol_prior[i] * np.sqrt(252) if vol_prior[i] > 0 else 0
-        print(f"  {t:<8s}  {mu_prior[i]*100:>8.4f}  {vol_prior[i]*100:>8.4f}  {sr:>8.2f}")
+        print(f"  {t:<8s}  {mu_prior[i]*100:>8.4f}  {vol_prior[i]*100:>8.4f}  {sr:>8.2f}  {n_obs_i:>6d}")
 
     print_views_summary(views)
     bl_views, ep_views = build_views(views, tickers, Sigma, X=X, p=p, tau=TAU)
@@ -334,6 +377,19 @@ if __name__ == "__main__":
     print(f"  Precios: {prices.shape[0]} fechas × {prices.shape[1]} activos")
     print(f"  Rango: {prices.index[0].date()} → {prices.index[-1].date()}")
     print(f"  Activos ({len(tickers)}): {tickers}")
+
+    # ── Diagnóstico del panel ──
+    diag = get_panel_diagnostics(prices)
+    min_coverage = diag["cobertura_pct"].min()
+    if min_coverage < 100:
+        print(f"\n  ⚠ Panel desbalanceado detectado:")
+        for _, row in diag[diag["cobertura_pct"] < 100].iterrows():
+            print(f"    {row['ticker']}: {row['cobertura_pct']}% cobertura, "
+                  f"desde {row['primera_fecha'].date()}, "
+                  f"{row['nan_inicio']} fechas sin historia")
+    else:
+        print(f"\n  ✓ Panel balanceado: todos los activos tienen historia completa")
+
     print(f"\n  Weights del Merval (top 5):")
     for t, w in sorted(zip(tickers, w_mkt), key=lambda x: -x[1])[:5]:
         print(f"    {t}: {w:.4%}")
