@@ -61,6 +61,11 @@ class ViewType(Enum):
     RANKING = "ranking"
     VOLATILITY = "volatility"
     TAIL = "tail"
+    # ── Nuevos: versiones de desigualdad ──
+    ABSOLUTE_INEQ = "absolute_ineq"      # E[R_i] >= o <= target
+    RELATIVE_INEQ = "relative_ineq"      # E[R_long - R_short] >= o <= target
+    VOLATILITY_INEQ = "volatility_ineq"  # σ(X_i) <= o >= target
+    TAIL_UPPER = "tail_upper"            # P(X_i > threshold) <= max_prob
 
 
 @dataclass
@@ -257,6 +262,143 @@ class ViewSpec:
             params={"threshold": threshold, "max_prob": max_prob},
             confidence=confidence,
             label=f"P(R_{ticker} < {threshold:.2%}) ≤ {max_prob:.2%}",
+            bl_compatible=False,
+        )
+
+    # ── Nuevos constructores: desigualdades ──────────────────────────
+
+    @staticmethod
+    def absolute_ineq(
+        ticker: str,
+        bound: float,
+        direction: str = "geq",
+        confidence: float = 0.5,
+    ) -> "ViewSpec":
+        """
+        View absoluto de desigualdad: E[R_i] >= bound  o  E[R_i] <= bound.
+
+        Solo compatible con EP/q-EP.
+
+        Parameters
+        ----------
+        ticker : str
+        bound : float
+            Cota del retorno esperado.
+        direction : str
+            "geq" → E[R_i] >= bound  (esperás al menos este retorno)
+            "leq" → E[R_i] <= bound  (esperás como mucho este retorno)
+        confidence : float
+        """
+        sym = "≥" if direction == "geq" else "≤"
+        return ViewSpec(
+            view_type=ViewType.ABSOLUTE_INEQ,
+            tickers=[ticker],
+            params={"bound": bound, "direction": direction},
+            confidence=confidence,
+            label=f"E[R_{ticker}] {sym} {bound:.4%}",
+            bl_compatible=False,
+        )
+
+    @staticmethod
+    def relative_ineq(
+        ticker_long: str,
+        ticker_short: str,
+        bound: float = 0.0,
+        direction: str = "geq",
+        confidence: float = 0.5,
+    ) -> "ViewSpec":
+        """
+        View relativo de desigualdad: E[R_long - R_short] >= bound (o <=).
+
+        Solo compatible con EP/q-EP.
+
+        Parameters
+        ----------
+        ticker_long, ticker_short : str
+        bound : float
+            Cota del spread.
+        direction : str
+            "geq" → spread >= bound
+            "leq" → spread <= bound
+        confidence : float
+        """
+        sym = "≥" if direction == "geq" else "≤"
+        return ViewSpec(
+            view_type=ViewType.RELATIVE_INEQ,
+            tickers=[ticker_long, ticker_short],
+            params={"bound": bound, "direction": direction},
+            confidence=confidence,
+            label=f"E[R_{ticker_long}] - E[R_{ticker_short}] {sym} {bound:.4%}",
+            bl_compatible=False,
+        )
+
+    @staticmethod
+    def volatility_ineq(
+        ticker: str,
+        bound_vol: float,
+        direction: str = "leq",
+        confidence: float = 0.5,
+    ) -> "ViewSpec":
+        """
+        View de volatilidad de desigualdad: σ(X_i) <= bound  o  σ(X_i) >= bound.
+
+        Solo compatible con EP/q-EP.
+
+        En EP se traduce a un constraint sobre el segundo momento:
+          direction="leq": E_p̃[X_i²] ≤ σ_bound² + μ²  (vol no supera el bound)
+          direction="geq": E_p̃[X_i²] ≥ σ_bound² + μ²  (vol al menos el bound)
+
+        Parameters
+        ----------
+        ticker : str
+        bound_vol : float
+            Cota de volatilidad (desvío estándar).
+        direction : str
+            "leq" → σ ≤ bound  (vol no va a superar esto)
+            "geq" → σ ≥ bound  (vol va a ser al menos esto)
+        confidence : float
+        """
+        sym = "≤" if direction == "leq" else "≥"
+        return ViewSpec(
+            view_type=ViewType.VOLATILITY_INEQ,
+            tickers=[ticker],
+            params={"bound_vol": bound_vol, "direction": direction},
+            confidence=confidence,
+            label=f"σ({ticker}) {sym} {bound_vol:.2%}",
+            bl_compatible=False,
+        )
+
+    @staticmethod
+    def tail_upper(
+        ticker: str,
+        threshold: float,
+        max_prob: float,
+        confidence: float = 0.5,
+    ) -> "ViewSpec":
+        """
+        View sobre cola derecha: P(X_i > threshold) <= max_prob.
+
+        Complemento de tail() que cubre la cola izquierda.
+        Útil para limitar la probabilidad de eventos extremos positivos
+        (ej: blow-up de yield).
+
+        Solo compatible con EP/q-EP.
+
+        Parameters
+        ----------
+        ticker : str
+        threshold : float
+            Umbral (ej: 0.02 para +2% de Δy = suba de yield de 200 bps).
+        max_prob : float
+            Probabilidad máxima en la cola derecha.
+        confidence : float
+        """
+        return ViewSpec(
+            view_type=ViewType.TAIL_UPPER,
+            tickers=[ticker],
+            params={"threshold": threshold, "max_prob": max_prob},
+            confidence=confidence,
+            label=f"P(R_{ticker} > {threshold:.2%}) ≤ {max_prob:.2%}",
             bl_compatible=False,
         )
 
@@ -518,6 +660,74 @@ def build_ep_views(
             # Indicadora: 1 si X_{j,i} < threshold, 0 otherwise
             indicator = (X[:, idx] < threshold).astype(float)  # (J,)
             # Mezcla con confianza
+            prior_tail_prob = float(p @ indicator)
+            target = c * max_prob + (1 - c) * prior_tail_prob
+            A_rows.append(indicator)
+            b_vals.append(target)
+            ineq_labels.append(v.label)
+
+        # ── Nuevos tipos de desigualdad ──
+
+        elif v.view_type == ViewType.ABSOLUTE_INEQ:
+            # E[R_i] >= bound  →  -E_p̃[X_i] ≤ -bound  →  A = -X[:,i], b = -bound
+            # E[R_i] <= bound  →   E_p̃[X_i] ≤  bound  →  A =  X[:,i], b =  bound
+            idx = _ticker_index(v.tickers[0], tickers)
+            bound = v.params["bound"]
+            direction = v.params["direction"]
+            prior_mean = float(p @ X[:, idx])
+            target = c * bound + (1 - c) * prior_mean
+            if direction == "geq":
+                A_rows.append(-X[:, idx])
+                b_vals.append(-target)
+            else:  # "leq"
+                A_rows.append(X[:, idx].copy())
+                b_vals.append(target)
+            ineq_labels.append(v.label)
+
+        elif v.view_type == ViewType.RELATIVE_INEQ:
+            # E[R_long - R_short] >= bound  →  -(X_long - X_short) p̃ ≤ -bound
+            # E[R_long - R_short] <= bound  →   (X_long - X_short) p̃ ≤  bound
+            idx_long = _ticker_index(v.tickers[0], tickers)
+            idx_short = _ticker_index(v.tickers[1], tickers)
+            diff = X[:, idx_long] - X[:, idx_short]
+            bound = v.params["bound"]
+            direction = v.params["direction"]
+            prior_spread = float(p @ diff)
+            target = c * bound + (1 - c) * prior_spread
+            if direction == "geq":
+                A_rows.append(-diff)
+                b_vals.append(-target)
+            else:  # "leq"
+                A_rows.append(diff.copy())
+                b_vals.append(target)
+            ineq_labels.append(v.label)
+
+        elif v.view_type == ViewType.VOLATILITY_INEQ:
+            # σ ≤ bound  →  E_p̃[X_i²] ≤ σ_bound² + μ²
+            # σ ≥ bound  →  E_p̃[X_i²] ≥ σ_bound² + μ²  →  -E_p̃[X_i²] ≤ -(σ_bound² + μ²)
+            idx = _ticker_index(v.tickers[0], tickers)
+            bound_vol = v.params["bound_vol"]
+            direction = v.params["direction"]
+            prior_mean = float(p @ X[:, idx])
+            prior_second = float(p @ (X[:, idx] ** 2))
+            target_second = bound_vol**2 + prior_mean**2
+            target = c * target_second + (1 - c) * prior_second
+            row = X[:, idx] ** 2
+            if direction == "leq":
+                A_rows.append(row)
+                b_vals.append(target)
+            else:  # "geq"
+                A_rows.append(-row)
+                b_vals.append(-target)
+            ineq_labels.append(v.label)
+
+        elif v.view_type == ViewType.TAIL_UPPER:
+            # P(X_i > threshold) ≤ max_prob
+            # Σ_{j: X_{j,i} > threshold} p̃_j ≤ max_prob
+            idx = _ticker_index(v.tickers[0], tickers)
+            threshold = v.params["threshold"]
+            max_prob = v.params["max_prob"]
+            indicator = (X[:, idx] > threshold).astype(float)
             prior_tail_prob = float(p @ indicator)
             target = c * max_prob + (1 - c) * prior_tail_prob
             A_rows.append(indicator)
