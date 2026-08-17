@@ -167,11 +167,14 @@ def _mean_variance_optimal(
     delta: float = 2.5,
     long_only: bool = True,
     max_weight: float = 1.0,
+    w_benchmark: Optional[np.ndarray] = None,
+    max_active_deviation: Optional[float] = None,
 ) -> np.ndarray:
     """
     Resuelve el problema de media-varianza:
         max_w  w^T μ - (δ/2) w^T Σ w
         s.t.   1^T w = 1, 0 ≤ w_i ≤ max_weight (si long_only)
+               |w_i - w_bench_i| ≤ max_active_deviation  (si se provee)
 
     Parameters
     ----------
@@ -183,13 +186,30 @@ def _mean_variance_optimal(
         Si True, impone w >= 0.
     max_weight : float
         Peso máximo por activo (ej: 0.30 para 30%). Default 1.0 (sin límite).
+    w_benchmark : (N,) np.ndarray, optional
+        Pesos del benchmark. Requerido si se usa max_active_deviation.
+    max_active_deviation : float, optional
+        Desvío máximo por activo vs benchmark (ej: 0.10 para ±10%).
+        Cada w_i debe estar en [w_bench_i - dev, w_bench_i + dev].
 
     Returns
     -------
     w : (N,) pesos óptimos
     """
     N = len(mu)
-    bounds = [(0.0, max_weight)] * N if long_only else [(-max_weight, max_weight)] * N
+
+    # Bounds por activo: combina max_weight con active deviation
+    if w_benchmark is not None and max_active_deviation is not None:
+        bounds = []
+        for i in range(N):
+            lo = max(0.0 if long_only else -max_weight,
+                     w_benchmark[i] - max_active_deviation)
+            hi = min(max_weight,
+                     w_benchmark[i] + max_active_deviation)
+            lo = max(lo, 0.0) if long_only else lo
+            bounds.append((lo, hi))
+    else:
+        bounds = [(0.0, max_weight)] * N if long_only else [(-max_weight, max_weight)] * N
 
     def objective(w):
         return -(w @ mu - (delta / 2) * w @ Sigma @ w)
@@ -295,6 +315,7 @@ def run_black_litterman(
     p: Optional[np.ndarray] = None,
     num_portf: int = 20,
     max_weight: float = 1.0,
+    max_active_deviation: Optional[float] = None,
 ) -> ModelResult:
     """
     Ejecuta el modelo de Black-Litterman.
@@ -342,7 +363,8 @@ def run_black_litterman(
     mu_BL = Sigma_BL @ (tau_Sigma_inv @ Pi + P.T @ Omega_inv @ Q)
 
     # Portafolio óptimo
-    w_BL = _mean_variance_optimal(mu_BL, Sigma, delta=delta, long_only=True, max_weight=max_weight)
+    w_BL = _mean_variance_optimal(mu_BL, Sigma, delta=delta, long_only=True, max_weight=max_weight,
+                                    w_benchmark=w_mkt, max_active_deviation=max_active_deviation)
 
     # Frontera eficiente con la distribución posterior
     frontier_e, frontier_s, frontier_w = _efficient_frontier_mv(
@@ -380,6 +402,7 @@ def run_entropy_pooling(
     confidence: float = 1.0,
     num_portf: int = 20,
     max_weight: float = 1.0,
+    max_active_deviation: Optional[float] = None,
 ) -> ModelResult:
     """
     Ejecuta Entropy Pooling clásico (Shannon/Kullback-Leibler).
@@ -431,7 +454,8 @@ def run_entropy_pooling(
     Sigma_post = Scnd - np.outer(mu_post, mu_post)
 
     # Portafolio óptimo
-    w_opt = _mean_variance_optimal(mu_post, Sigma_post, delta=delta, long_only=True, max_weight=max_weight)
+    w_opt = _mean_variance_optimal(mu_post, Sigma_post, delta=delta, long_only=True, max_weight=max_weight,
+                                    w_benchmark=w_mkt, max_active_deviation=max_active_deviation)
 
     # Frontera eficiente usando EP (distribución completa)
     opts = FrontierOptions(NumPortf=num_portf, FrontierSpan=(0.3, 0.9))
@@ -469,6 +493,7 @@ def run_q_tsallis_ep(
     confidence: float = 1.0,
     num_portf: int = 20,
     max_weight: float = 1.0,
+    max_active_deviation: Optional[float] = None,
 ) -> ModelResult:
     """
     Ejecuta q-Tsallis Entropy Pooling.
@@ -522,7 +547,8 @@ def run_q_tsallis_ep(
     Sigma_post = Scnd - np.outer(mu_post, mu_post)
 
     # Portafolio óptimo
-    w_opt = _mean_variance_optimal(mu_post, Sigma_post, delta=delta, long_only=True, max_weight=max_weight)
+    w_opt = _mean_variance_optimal(mu_post, Sigma_post, delta=delta, long_only=True, max_weight=max_weight,
+                                    w_benchmark=w_mkt, max_active_deviation=max_active_deviation)
 
     # Frontera eficiente
     opts = FrontierOptions(NumPortf=num_portf, FrontierSpan=(0.3, 0.9))
@@ -631,14 +657,15 @@ def plot_model_comparison(
     tickers: List[str],
     w_mkt: np.ndarray,
     save_path: Optional[str] = None,
+    bench_result: Optional[ModelResult] = None,
 ) -> None:
     """
-    Genera gráficos comparativos de los tres modelos.
+    Genera gráficos comparativos de los modelos.
 
     Panel 1: Pesos óptimos (barras agrupadas)
     Panel 2: Fronteras eficientes superpuestas
     Panel 3: Retornos esperados posteriores
-    Panel 4: Medidas de riesgo
+    Panel 4: Medidas de riesgo (incluye benchmark si se provee)
     """
     import matplotlib.pyplot as plt
 
@@ -670,14 +697,22 @@ def plot_model_comparison(
     # ── Panel 2: Fronteras eficientes ──
     ax2 = fig.add_subplot(2, 2, 2)
     for i, r in enumerate(results):
-        ax2.plot(r.frontier_s * 100, r.frontier_e * 100, "o-",
-                 color=colors[i % len(colors)], markersize=3, linewidth=1.5,
-                 label=r.model_name)
+        if len(r.frontier_s) > 0:
+            ax2.plot(r.frontier_s * 100, r.frontier_e * 100, "o-",
+                     color=colors[i % len(colors)], markersize=3, linewidth=1.5,
+                     label=r.model_name)
         # Marcar portafolio óptimo
         vol_opt = float(np.sqrt(r.w_optimal @ r.Sigma_posterior @ r.w_optimal))
         ret_opt = float(r.w_optimal @ r.mu_posterior)
         ax2.plot(vol_opt * 100, ret_opt * 100, "D",
                  color=colors[i % len(colors)], markersize=10, markeredgecolor="black")
+
+    # Marcar benchmark en la frontera
+    if bench_result is not None:
+        vol_b = float(np.sqrt(bench_result.w_optimal @ bench_result.Sigma_posterior @ bench_result.w_optimal))
+        ret_b = float(bench_result.w_optimal @ bench_result.mu_posterior)
+        ax2.plot(vol_b * 100, ret_b * 100, "D",
+                 color="gray", markersize=10, markeredgecolor="black", label="Benchmark")
 
     ax2.set_xlabel("Volatilidad (%)")
     ax2.set_ylabel("Retorno esperado (%)")
@@ -687,10 +722,21 @@ def plot_model_comparison(
 
     # ── Panel 3: Retornos esperados ──
     ax3 = fig.add_subplot(2, 2, 3)
+    # Si hay benchmark, agregar una serie más
+    n_series = n_models + (1 if bench_result is not None else 0)
+    width3 = 0.8 / n_series
+    offset_start = -n_series / 2 + 0.5
+
+    if bench_result is not None:
+        ax3.barh(x + width3 * offset_start, bench_result.mu_posterior * 100, width3,
+                 label="Benchmark (prior)", color="gray", alpha=0.5)
+        offset_start += 1
+
     for i, r in enumerate(results):
-        ax3.barh(x + width * (i - n_models / 2 + 0.5), r.mu_posterior * 100, width,
+        ax3.barh(x + width3 * (offset_start + i), r.mu_posterior * 100, width3,
                  label=r.model_name, color=colors[i % len(colors)], alpha=0.8)
 
+    ax3.axvline(0, color="black", linewidth=0.5, linestyle="--")
     ax3.set_yticks(x)
     ax3.set_yticklabels(tickers, fontsize=8)
     ax3.set_xlabel("Retorno esperado diario (%)")
@@ -703,12 +749,21 @@ def plot_model_comparison(
     risk_keys = ["expected_return_annual", "volatility_annual", "sharpe_ratio"]
     risk_labels = ["E[R] anual", "Vol anual", "Sharpe"]
     x_risk = np.arange(len(risk_keys))
-    width_r = 0.8 / n_models
+    n_bars = n_models + (1 if bench_result is not None else 0)
+    width_r = 0.8 / n_bars
+
+    bar_idx = 0
+    if bench_result is not None:
+        vals_b = [bench_result.risk_metrics.get(k, 0) * (100 if "ratio" not in k else 1) for k in risk_keys]
+        ax4.bar(x_risk + width_r * (bar_idx - n_bars / 2 + 0.5), vals_b, width_r,
+                label="Benchmark", color="gray", alpha=0.5, edgecolor="black")
+        bar_idx += 1
 
     for i, r in enumerate(results):
         vals = [r.risk_metrics.get(k, 0) * (100 if "ratio" not in k else 1) for k in risk_keys]
-        ax4.bar(x_risk + width_r * (i - n_models / 2 + 0.5), vals, width_r,
+        ax4.bar(x_risk + width_r * (bar_idx - n_bars / 2 + 0.5), vals, width_r,
                 label=r.model_name, color=colors[i % len(colors)], alpha=0.8)
+        bar_idx += 1
 
     ax4.set_xticks(x_risk)
     ax4.set_xticklabels(risk_labels)
