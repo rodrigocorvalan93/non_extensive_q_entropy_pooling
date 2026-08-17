@@ -24,30 +24,55 @@ El aporte principal es la demostración de que el parámetro **q = 2** (entropí
 - **Backtest out-of-sample** (Merval, sep 2025 – mar 2026): EP y q-Tsallis-EP logran Sharpe 3.24 vs 2.06 del benchmark, con alfa anualizado de +48%.
 - Validación cruzada Python vs GNU Octave con discrepancias < 10⁻⁵.
 
+### Extensión a renta fija (bonos)
+
+El framework se extiende a carteras reales de bonos (`s_main_bonds.py`): el factor invariante es el **cambio de yield (Δy)** y el puente hacia retornos de precio es el mapeo por duration/convexity:
+
+```
+ΔP/P ≈ -D_mod · Δy + ½ · C · (Δy)²
+```
+
+con tres modos de duration (`constant`, `rolling`, `rolling_convex`). Los views del Portfolio Manager se expresan sobre Δy (recordar: Δy negativo = suba de precio). Para paneles desbalanceados (papeles con poca historia) la covarianza se estima de forma robusta con `covariance_estimation.py` (estimación pairwise + corrección PSD de Higham).
+
 ---
 
 ## Estructura del repositorio
 
 ```
 ├── entropy_pooling_v2.py         Motor de EP generalizado (Shannon/Tsallis/Rényi)
-├── views_config.py               Sistema de especificación de views
-├── models.py                     Modelos: BL, EP-Shannon, q-Tsallis-EP
-├── portfolio_evolution.py        Backtest out-of-sample y métricas
+├── views_config.py               Sistema de especificación de views (incluye views de desigualdad)
+├── models.py                     Modelos: BL, EP-Shannon, q-Tsallis-EP (+ restricción vs benchmark)
+├── covariance_estimation.py      Covarianza robusta p/ paneles desbalanceados (pairwise + Higham)
+├── portfolio_evolution.py        Backtest out-of-sample y métricas (+ alfa/beta OLS)
 │
 ├── s_main_merval.py              Aplicación empírica: Merval Panel Líder
+├── s_main_bonds.py               Aplicación empírica: bonos (yields → duration mapping)
 ├── s_main_optimal_q.py           Determinación del q óptimo
 ├── s_main_custom_entropy.py      Demo: EP con entropía seleccionable
 ├── s_main_v2_all.py              Demo: ranking + toy-sample
 ├── datos_chicos_test.py          Test: EP vs Newton-KKT
 │
-├── input_mkt_px.xlsx             Precios históricos (panel líder, 2017–2025)
-├── input_mkt_w.xlsx              Weights del Merval al 22/sep/2025
-├── input_current_mkt_px.xlsx     Precios OOS (sep 2025 – mar 2026)
-├── ReturnsDistribution.mat       Base de datos de Meucci (100k escenarios)
-├── ReturnsDistributionShort.mat  Versión reducida (1k escenarios)
+├── input_mkt_px.xlsx             Serie histórica activa (precios o yields, según dataset)
+├── input_mkt_w.xlsx              Weights del portfolio benchmark
+├── input_current_mkt_px.xlsx     Precios del período out-of-sample
+├── input_bond_stats.xlsx         Duration y convexity de los bonos (hojas "duration"/"convexity")
+├── bbg_input_data_merval.xlsx    Datos fuente Bloomberg (acciones)
+├── bbg_input_data_globales_yields.xlsx  Datos fuente Bloomberg (yields de globales)
+├── views_bonds_pm.docx           Views del PM para la cartera de bonos
+│
+├── data/
+│   ├── dataacciones/             Juego de inputs para acciones (Merval)
+│   └── databonos/                Juego de inputs para bonos
+│
+├── ReturnsDistributionShort.mat  Base de Meucci reducida (1k escenarios)
 │
 └── octave-matlab-versions/       Código original en GNU Octave/MATLAB
+                                  (incluye ReturnsDistribution.mat, 100k escenarios)
 ```
+
+> **Datasets intercambiables:** los scripts leen los `input_*.xlsx` de la raíz. Las carpetas `data/dataacciones/` y `data/databonos/` guardan los dos juegos de inputs; copiá el juego que corresponda a la raíz según lo que quieras correr. **El estado actual de la raíz tiene activo el dataset de bonos** (`input_mkt_px.xlsx` contiene yields).
+
+> **Nota:** `ReturnsDistribution.mat` (100k escenarios) se quitó de la raíz para aligerar el repo; sigue disponible en `octave-matlab-versions/`. `s_main_optimal_q.py` usa automáticamente la versión Short si no lo encuentra; para el barrido completo, copialo de vuelta a la raíz.
 
 ---
 
@@ -81,15 +106,27 @@ python s_main_merval.py
 
 Compara BL vs EP-Shannon vs q-Tsallis-EP con los 20 activos del panel líder. Genera gráficos comparativos y exporta resultados a Excel.
 
-### 3. Backtest out-of-sample
+> Requiere el dataset de acciones en la raíz (`data/dataacciones/` → raíz).
+
+### 3. Portfolio óptimo de bonos
+
+```bash
+python s_main_bonds.py
+```
+
+Aplica el pipeline completo a una cartera real de bonos usando yields como factor invariante (`input_mkt_px.xlsx` con yields en decimal), el mapeo Δy → ΔP/P vía modified duration/convexity (`input_bond_stats.xlsx`) y views del PM expresados sobre Δy. Configurable con `DURATION_MODE` (`constant` / `rolling` / `rolling_convex`). Genera `model_comparison_bonds.png` y `resultados_bonds.xlsx`.
+
+> Requiere el dataset de bonos en la raíz (`data/databonos/` → raíz), que es el estado actual del repo.
+
+### 4. Backtest out-of-sample
 
 ```bash
 python portfolio_evolution.py
 ```
 
-Evalúa la performance de cada cartera en el período sep 2025 – mar 2026. Calcula Sharpe, Sortino, Max Drawdown, Tracking Error, Alfa y Beta.
+Evalúa la performance de cada cartera en el período sep 2025 – mar 2026. Calcula Sharpe, Sortino, Max Drawdown, Tracking Error, Alfa y Beta (regresión OLS contra el benchmark).
 
-### 4. Definir views personalizados
+### 5. Definir views personalizados
 
 ```python
 from views_config import ViewSpec
@@ -113,7 +150,13 @@ views = [
 | `relative` | Spread entre dos activos | BL + EP |
 | `ranking` | Ordenamiento de retornos | BL + EP |
 | `volatility` | Volatilidad target | EP solamente |
-| `tail` | Probabilidad máxima en la cola | EP solamente |
+| `tail` | Probabilidad máxima en la cola inferior | EP solamente |
+| `absolute_ineq` | Desigualdad absoluta: E[R_i] ≥ o ≤ cota | EP solamente |
+| `relative_ineq` | Desigualdad relativa: E[R_long − R_short] ≥ o ≤ cota | EP solamente |
+| `volatility_ineq` | Desigualdad de volatilidad: σ(X_i) ≤ o ≥ cota | EP solamente |
+| `tail_upper` | Probabilidad máxima en la cola superior | EP solamente |
+
+Además, el optimizador de `models.py` acepta una **restricción de desvío activo vs benchmark**: `|w_i − w_bench_i| ≤ max_active_deviation` (parámetros `w_benchmark` y `max_active_deviation`).
 
 ---
 

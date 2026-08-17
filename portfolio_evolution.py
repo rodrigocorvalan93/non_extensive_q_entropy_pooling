@@ -233,6 +233,15 @@ def compute_metrics(
             metrics["Information Ratio"] = info_ratio
             metrics["Exceso retorno anual (%)"] = excess.mean() * annualization * 100
 
+            # Beta y Alfa (regresión OLS: R_p = α + β·R_bench + ε)
+            r_p = rets.loc[common_idx].values
+            r_b = bench_rets.loc[common_idx].values
+            beta = np.cov(r_p, r_b)[0, 1] / np.var(r_b) if np.var(r_b) > 0 else 1.0
+            alpha_daily = r_p.mean() - beta * r_b.mean()
+            alpha_annual = alpha_daily * annualization
+            metrics["Beta"] = beta
+            metrics["Alfa anualizado (%)"] = alpha_annual * 100
+
     return metrics
 
 
@@ -350,6 +359,8 @@ def plot_comparison(
         "Drawdown duración (días)",
         "Tracking Error anualizado (%)",
         "Information Ratio",
+        "Beta",
+        "Alfa anualizado (%)",
     ]
 
     available = [m for m in display_metrics if m in metrics_df.columns]
