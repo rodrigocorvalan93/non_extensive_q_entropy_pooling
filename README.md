@@ -146,7 +146,7 @@ Ver [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) y [`data/README.md`](data
 
 ## Uso de herramientas de IA
 
-El marco, sus implementaciones en Octave y en Python, el barrido de *q* y la aplicación al Merval son trabajo del autor, y el historial de commits los fecha en marzo de 2026. Para el paper el autor usó un asistente de IA generativa: revisó el modelo, modificó el código, dedujo las proposiciones, diseñó y corrió el experimento de stress y los chequeos de control y de robustez, buscó literatura y redactó el texto. La declaración, con el nombre de la herramienta, está debajo del resumen del paper.
+El marco, sus implementaciones en Octave y en Python, el barrido de *q* y la aplicación al Merval son trabajo del autor, y el historial de commits los fecha en marzo de 2026. Para el paper el autor usó un asistente de IA generativa para revisar el modelo, el código y la literatura, derivar las proposiciones, implementar el experimento de stress y los controles de robustez, y redactar el borrador. La declaración, con el nombre de la herramienta, está debajo del resumen del paper.
 
 ## Historial
 
