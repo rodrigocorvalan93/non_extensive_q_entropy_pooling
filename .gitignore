@@ -1,5 +1,19 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-!bbg_input_data_merval.xlsx
 .vscode/
+
+# LaTeX build
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+
+# Tests y registros de corridas
+.pytest_cache/
+results/log_*.txt
+
+# Planillas de descarga y documentos de trabajo: no van al repositorio
+bbg_*.xlsx
+*.docx
+~$*

@@ -211,17 +211,25 @@ def _mean_variance_optimal(
     else:
         bounds = [(0.0, max_weight)] * N if long_only else [(-max_weight, max_weight)] * N
 
+    # La utilidad es muy plana en w (con retornos diarios vale del orden de
+    # 1e-3), así que la tolerancia de SLSQP sobre la función sin escalar deja
+    # los pesos con un error de 1e-3. Se optimiza la utilidad reescalada para
+    # que su gradiente sea de orden uno: los pesos quedan a menos de 1e-6 de
+    # los de un QP exacto.
+    esc = 1.0 / max(float(np.max(np.abs(mu))), float(delta * np.max(np.diag(Sigma))), 1e-12)
+
     def objective(w):
-        return -(w @ mu - (delta / 2) * w @ Sigma @ w)
+        return -esc * (w @ mu - (delta / 2) * w @ Sigma @ w)
 
     def grad(w):
-        return -(mu - delta * Sigma @ w)
+        return -esc * (mu - delta * Sigma @ w)
 
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
+    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0,
+                    "jac": lambda w: np.ones_like(w)}]
 
     w0 = np.full(N, 1.0 / N)
     res = minimize(objective, w0, jac=grad, bounds=bounds, constraints=constraints,
-                   method="SLSQP", options={"maxiter": 10000, "ftol": 1e-12})
+                   method="SLSQP", options={"maxiter": 10000, "ftol": 1e-15})
 
     if not res.success:
         import warnings
@@ -316,6 +324,7 @@ def run_black_litterman(
     num_portf: int = 20,
     max_weight: float = 1.0,
     max_active_deviation: Optional[float] = None,
+    prior_mean: Optional[np.ndarray] = None,
 ) -> ModelResult:
     """
     Ejecuta el modelo de Black-Litterman.
@@ -341,6 +350,11 @@ def run_black_litterman(
     X, p : opcionales, para calcular VaR/CVaR.
     num_portf : int
         Número de portafolios en la frontera eficiente.
+    prior_mean : (N,) np.ndarray, optional
+        Media del prior. Por defecto (None) se usan los retornos implícitos de
+        equilibrio Π = δ Σ w_mkt. Pasar, por ejemplo, las medias históricas
+        permite aplicar la misma fórmula de actualización a otro prior y así
+        separar el efecto del prior del efecto del método.
 
     Returns
     -------
@@ -349,8 +363,14 @@ def run_black_litterman(
     N = len(tickers)
     P, Q, Omega = bl_views.P, bl_views.Q, bl_views.Omega
 
-    # Reverse optimization: retornos implícitos de equilibrio
-    Pi = delta * Sigma @ w_mkt  # (N,)
+    # Prior: retornos implícitos de equilibrio (reverse optimization), salvo
+    # que se pase otra media explícitamente.
+    if prior_mean is None:
+        Pi = delta * Sigma @ w_mkt  # (N,)
+    else:
+        Pi = np.asarray(prior_mean, dtype=float).reshape(-1)
+        if Pi.shape[0] != N:
+            raise ValueError("prior_mean debe tener un valor por activo")
 
     # Posterior BL
     tau_Sigma_inv = np.linalg.inv(tau * Sigma)  # (N,N)
@@ -501,9 +521,9 @@ def run_q_tsallis_ep(
     Resuelve:
         p̃_q = argmin_{x: Ax≤b, Aeq·x=beq}  (1/(q-1)) * [Σ p_j (x_j/p_j)^q - 1]
 
-    Para q=2 corresponde a la entropía de colisión (Rényi collision entropy),
-    que se demostró es el valor óptimo para la determinación del posterior
-    con mínima distancia al prior.
+    Para q=2 la divergencia es la chi-cuadrado de Pearson: con prior uniforme
+    el posterior es la proyección euclídea del prior sobre los views y
+    maximiza el tamaño muestral efectivo de Kish.
 
     Ref: Tsallis (1988), Corvalán Salguero (2026).
 
@@ -516,7 +536,7 @@ def run_q_tsallis_ep(
     w_mkt : (N,) pesos del benchmark
     delta : float
     q : float
-        Parámetro de Tsallis. Default 2.0 (óptimo demostrado).
+        Parámetro de Tsallis. Default 2.0.
     confidence : float
     num_portf : int
 

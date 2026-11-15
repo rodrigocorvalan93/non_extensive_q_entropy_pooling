@@ -253,6 +253,11 @@ def entropy_prog(
         Lx : callable L(x) con los multiplicadores óptimos
         lv : vector concatenado de multiplicadores [l; v]
              (l: K_ ineq >=0, v: K eq libres)
+
+    Alcance: Shannon y Tsallis con q > 1 son los casos que usa el paper; se
+    resuelven por el dual y la solución se acepta solo si cumple las
+    condiciones KKT. Rényi y General usan un punto fijo con tolerancia menor.
+    Con q < 1 solo se admiten views de igualdad y problemas chicos.
     """
     p = _as_1d(p, dtype=float)
     if np.any(p < 0):
@@ -456,7 +461,9 @@ def entropy_prog(
             z = z + (Aeq.T @ v)
 
         if ef == "S":
-            x = np.exp(np.log(p) - 1.0 - z)
+            # exponente acotado: si los views son infactibles los
+            # multiplicadores divergen y exp() desbordaría
+            x = np.exp(np.minimum(np.log(p) - 1.0 - z, 700.0))
             x = np.maximum(x, 1e-32)
             return x
 
@@ -465,24 +472,25 @@ def entropy_prog(
         power = 1.0 / (q - 1.0)
 
         if ef == "T":
-            # FIX: c = (1/q)-1 < 0 cuando q > 1.  La solución KKT requiere
-            # que c*z_i > 0 para cada componente, lo que equivale a z_i < 0
-            # (pues c < 0).  Si algún z_i viola esto, el clamp a 1e-32 oculta
-            # el problema en lugar de reportarlo.  Chequeamos y advertimos.
+            # c = (1/q)-1 < 0 cuando q > 1. La condición de primer orden da
+            # x_j = p_j (c z_j)^(1/(q-1)) cuando c*z_j > 0. Si c*z_j <= 0 la
+            # derivada del Lagrangiano es positiva para todo x_j > 0, así que el
+            # mínimo sobre x_j >= 0 está en x_j = 0: truncar es la solución
+            # exacta del problema interno, no una aproximación. Los escenarios
+            # truncados valen exactamente 0 (fe y t(x) ya acotan sus
+            # argumentos): con un piso numérico positivo, para q grande la
+            # masa de los escenarios truncados, piso^(1/(q-1)), deja de ser
+            # despreciable y el residuo KKT se mediría sobre otro vector.
             arg = c * z
-            n_invalid = int(np.sum(arg <= 0))
-            if n_invalid > 0:
-                import warnings
-                warnings.warn(
-                    f"equis(Tsallis): {n_invalid} componentes con c*z <= 0 "
-                    f"(c={c:.4f}). El posterior puede ser inexacto en esas "
-                    f"componentes. Verificá que los multiplicadores converjan.",
-                    RuntimeWarning,
-                    stacklevel=3,
-                )
-            arg = np.maximum(arg, 1e-32)
-            x = (arg ** power) * p
-            x = np.maximum(x, 1e-32)
+            pos = arg > 0.0
+            x = np.zeros_like(arg, dtype=float)
+            if power == 1.0:
+                x[pos] = arg[pos] * p[pos]
+            else:
+                # potencia en logaritmos, acotada: con q cerca de 1 el
+                # exponente 1/(q-1) es enorme y arg**power desborda durante
+                # la búsqueda lineal
+                x[pos] = np.exp(np.minimum(power * np.log(arg[pos]), 700.0)) * p[pos]
             return x
 
         if ef == "R":
@@ -524,8 +532,15 @@ def entropy_prog(
         return p_, Lx, np.zeros(0)
 
     # ---- Branch q<1: Newton-Raphson multi (como en MATLAB)
-    # Lo implemento por completitud, pero en la práctica la tesis suele usar q>1.
+    # Se conserva por completitud y solo para views de igualdad en problemas
+    # chicos: resuelve grad L = 0, que impone A x = b en cada fila, sin la
+    # condición l >= 0 ni la complementariedad que requiere una desigualdad.
     if ef != "S" and q < 1.0:
+        if K_ > 0:
+            raise NotImplementedError(
+                "Para q < 1 solo se admiten views de igualdad: esta rama no impone "
+                "l >= 0 ni la complementariedad de las desigualdades. Use q > 1 "
+                "(o Shannon), o escriba el view como igualdad.")
         # Armamos el sistema de ecuaciones: grad(Lagrangiano) = 0
         # Variables concatenadas: X = [x (J), l (K_), v (K)]
         def Lagr(Xbig: Array) -> float:
@@ -600,25 +615,133 @@ def entropy_prog(
         raise RuntimeError("no se encontró solución (branch q<1)")
 
     # ---- Branch q>=1 (o Shannon): optimización dual en (l,v)
+    #
+    # El dual se optimiza en multiplicadores ESCALADOS u = lv * s, donde s_i es
+    # la escala (RMS bajo el prior) de la fila i de [A; Aeq]. Así el gradiente
+    # del dual es el residuo de cada restricción medido en unidades de su
+    # propia fila. Sin el escalado, la tolerancia del optimizador queda en las
+    # unidades de los datos: con retornos diarios (~1e-2) un residuo de 1e-5
+    # no es despreciable frente a objetivos de views de orden 1e-5 a 1e-4.
 
-    def dual_objective(lv: Array) -> Tuple[float, Array]:
-        lv = _as_1d(lv, dtype=float)
+    def _row_scale(M: Array) -> Array:
+        if M.shape[0] == 0:
+            return np.zeros(0, dtype=float)
+        sc = np.sqrt((M ** 2) @ p)
+        sc[~np.isfinite(sc) | (sc <= 0.0)] = 1.0
+        return sc
+
+    s_all = np.concatenate([_row_scale(A), _row_scale(Aeq)])
+    s_in, s_eq = s_all[:K_], s_all[K_:]
+
+    def dual_objective(u: Array) -> Tuple[float, Array]:
+        lv = _as_1d(u, dtype=float) / s_all
         l = lv[:K_]
         v = lv[K_:]
-        x = equis(l, v)
-        # L = fe(x) + l' (A x - b) + v'(Aeq x - beq)
-        Ax_minus_b = (A @ x - b) if K_ > 0 else np.zeros(0)
-        Aeqx_minus_beq = (Aeq @ x - beq) if K > 0 else np.zeros(0)
-        L = fe(x) + float(l @ Ax_minus_b) + float(v @ Aeqx_minus_beq)
+        # Si los views son infactibles el dual no está acotado y los
+        # multiplicadores divergen: se silencian los avisos numéricos de ese
+        # camino, que termina en el error explícito del chequeo KKT.
+        with np.errstate(over="ignore", invalid="ignore"):
+            x = equis(l, v)
+            # L = fe(x) + l' (A x - b) + v'(Aeq x - beq)
+            Ax_minus_b = (A @ x - b) if K_ > 0 else np.zeros(0)
+            Aeqx_minus_beq = (Aeq @ x - beq) if K > 0 else np.zeros(0)
+            L = fe(x) + float(l @ Ax_minus_b) + float(v @ Aeqx_minus_beq)
         mL = -L
-        # grad(mL) = [b - A x ; beq - Aeq x]
+        if not np.isfinite(mL):
+            return 1e300, np.zeros(K_ + K, dtype=float)
+        # grad(mL) respecto de lv = [b - A x ; beq - Aeq x]; respecto de u se
+        # divide por la escala de cada fila.
         grad = []
         if K_ > 0:
-            grad.append(b - A @ x)
+            grad.append(-Ax_minus_b / s_in)
         if K > 0:
-            grad.append(beq - Aeq @ x)
+            grad.append(-Aeqx_minus_beq / s_eq)
         gvec = np.concatenate(grad) if grad else np.zeros(0)
         return float(mL), gvec
+
+    def kkt_residual(lv: Array) -> float:
+        """
+        Residuo KKT (en unidades escaladas) de un candidato lv = [l; v]:
+          igualdades:     |beq - Aeq x| / s
+          desigualdades:  |min(l*s, (b - A x)/s)|   (factibilidad, l >= 0 y
+                          complementariedad a la vez)
+        Vale 0 solo en la solución exacta.
+        """
+        l = lv[:K_]
+        v = lv[K_:]
+        vals = []
+        with np.errstate(over="ignore", invalid="ignore"):
+            x = equis(l, v)
+            if K_ > 0:
+                vals.append(np.abs(np.minimum(l * s_in, (b - A @ x) / s_in)))
+            if K > 0:
+                vals.append(np.abs((beq - Aeq @ x) / s_eq))
+        if not vals:
+            return 0.0
+        r = float(np.max(np.concatenate(vals)))
+        return r if np.isfinite(r) else float("inf")
+
+    def newton_polish(lv: Array, max_iter: int = 60) -> Array:
+        """
+        Refinamiento de Newton (conjunto activo) sobre las condiciones KKT.
+
+        Los métodos cuasi-Newton se detienen cuando la mejora de la función
+        dual cae por debajo de la precisión de máquina, lo que deja residuos
+        del orden de 1e-8 a 1e-6. Para Shannon y Tsallis el Hessiano del dual
+        es explícito, M = A_F D A_F' con D = -dx/dz >= 0, así que unas pocas
+        iteraciones de Newton llevan el residuo a precisión de máquina. Cada
+        paso se acepta solo si reduce el residuo KKT.
+        """
+        if ef not in ("S", "T") or (K_ + K) == 0:
+            return lv
+        Aall = np.vstack([A, Aeq]) / s_all[:, None]          # filas escaladas
+        ball = np.concatenate([b, beq]) / s_all
+        u = lv * s_all
+        best, best_res = lv.copy(), kkt_residual(lv)
+        for _ in range(max_iter):
+            if best_res < 1e-14:
+                break
+            z = Aall.T @ u
+            if ef == "S":
+                x = np.exp(np.log(p) - 1.0 - z)
+                D = x
+            else:
+                cq = (1.0 / q) - 1.0
+                pw = 1.0 / (q - 1.0)
+                arg = cq * z
+                act = arg > 0.0
+                safe = np.where(act, arg, 1.0)
+                lg = np.log(safe)
+                x = np.where(act, p * np.exp(np.minimum(pw * lg, 700.0)), 0.0)
+                D = np.where(act, p * pw * (-cq) * np.exp(np.minimum((pw - 1.0) * lg, 700.0)), 0.0)
+            r = ball - Aall @ x
+            free = np.ones(K_ + K, dtype=bool)
+            free[:K_] = (u[:K_] > 0.0) | (r[:K_] < 0.0)
+            if not np.any(free):
+                break
+            AF = Aall[free]
+            M = (AF * D) @ AF.T
+            try:
+                delta = np.linalg.solve(M, -r[free])
+            except np.linalg.LinAlgError:
+                delta = np.linalg.lstsq(M, -r[free], rcond=None)[0]
+            if not np.all(np.isfinite(delta)):
+                break
+            step, accepted = 1.0, False
+            for _ls in range(40):
+                cand = u.copy()
+                cand[free] += step * delta
+                cand[:K_] = np.maximum(cand[:K_], 0.0)
+                res_c = kkt_residual(cand / s_all)
+                if res_c < best_res:
+                    accepted = True
+                    break
+                step *= 0.5
+            if not accepted:
+                break
+            u = cand
+            best, best_res = u / s_all, res_c
+        return best
 
     x0 = np.zeros(K_ + K, dtype=float)
 
@@ -640,27 +763,62 @@ def entropy_prog(
         except Exception:
             pass
 
-
     # bounds: l>=0, v free
     bounds = [(0.0, None)] * K_ + [(None, None)] * K
 
-    res = minimize(
-        fun=lambda lv: dual_objective(lv),
-        x0=x0,
-        jac=True,
-        method="L-BFGS-B" if (K_ > 0) else "BFGS",
-        bounds=bounds if (K_ > 0) else None,
-        options={"maxiter": 10_000, "ftol": 1e-12, "disp": False},
-    )
-    if not res.success:
-        raise RuntimeError(f"EntropyProg no convergió: {res.message}")
+    if K_ > 0:
+        res = minimize(
+            fun=dual_objective, x0=x0 * s_all, jac=True, method="L-BFGS-B",
+            bounds=bounds,
+            options={"maxiter": 10_000, "maxfun": 100_000, "maxls": 50,
+                     "ftol": 1e-15, "gtol": 1e-11},
+        )
+    else:
+        res = minimize(
+            fun=dual_objective, x0=x0 * s_all, jac=True, method="BFGS",
+            options={"maxiter": 10_000, "gtol": 1e-11},
+        )
 
-    lv_opt = _as_1d(res.x, dtype=float)
+    lv_opt = _as_1d(res.x, dtype=float) / s_all
+    if K_ > 0:
+        lv_opt[:K_] = np.maximum(lv_opt[:K_], 0.0)
+
+    # El estado que informa el optimizador no alcanza como criterio: cerca del
+    # óptimo puede cortar por pérdida de precisión con un resultado correcto, o
+    # declarar éxito con residuos apreciables. Se decide con las condiciones
+    # KKT, después de un refinamiento de Newton cuando hay Hessiano explícito.
+    if np.all(np.isfinite(lv_opt)):
+        lv_opt = newton_polish(lv_opt)
+    kkt = kkt_residual(lv_opt) if np.all(np.isfinite(lv_opt)) else float("inf")
+    kkt_tol = 1e-8 if ef in ("S", "T") else 1e-5
+    if kkt > kkt_tol:
+        u_max = float(np.max(np.abs(lv_opt * s_all))) if lv_opt.size else 0.0
+        hint = ""
+        if (not np.isfinite(u_max)) or u_max > 1e6:
+            hint = (" Los multiplicadores divergen: el conjunto de views es "
+                    "probablemente infactible (no existe un posterior que cumpla "
+                    "todas las restricciones a la vez).")
+        raise RuntimeError(
+            f"EntropyProg no convergió: residuo KKT = {kkt:.2e} "
+            f"(tolerancia {kkt_tol:.0e}); optimizador: {res.message}.{hint}"
+        )
+
     l_opt = lv_opt[:K_]
     v_opt = lv_opt[K_:]
     p_ = equis(l_opt, v_opt)
     # proyectamos numéricamente al simplex (evita drift tipo 1.0000001)
     p_ = np.maximum(p_, 0.0)
+    if ef in ("T", "R"):
+        # El truncamiento en cero es la solución exacta del problema interno
+        # (ver equis); se quita el piso numérico para que los escenarios
+        # truncados (c*z_j <= 0) valgan exactamente 0. Para Rényi el soporte
+        # es el mismo: su argumento es c*t(x)*z_j, con t(x) > 0.
+        z_opt = np.zeros(J, dtype=float)
+        if K_ > 0:
+            z_opt = z_opt + A.T @ l_opt
+        if K > 0:
+            z_opt = z_opt + Aeq.T @ v_opt
+        p_[((1.0 / q) - 1.0) * z_opt <= 0.0] = 0.0
     p_ = p_ / np.sum(p_)
 
     def Lx(x: Array) -> float:

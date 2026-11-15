@@ -7,15 +7,25 @@ Estructura del repositorio:
     ├── entropy_pooling_v2.py        Motor de cálculo (EP generalizado)
     ├── views_config.py              Sistema de especificación de views
     ├── models.py                    Modelos de asignación (BL, EP, q-EP)
+    ├── covariance_estimation.py     Covarianza para paneles desbalanceados
+    ├── portfolio_evolution.py       Evaluación fuera de muestra
     ├── s_main_merval.py             Aplicación empírica: Merval
-    ├── s_main_optimal_q.py          Determinación del q óptimo
+    ├── s_main_merval_robustez.py    Robustez de la aplicación
+    ├── s_main_qep_vs_ep.py          Experimento de stress: EP contra q-EP
+    ├── s_main_verificaciones.py     Comprobaciones numéricas del paper
+    ├── s_main_bonds.py              Extensión a renta fija
+    ├── s_main_optimal_q.py          Barrido de q (versión original)
     ├── s_main_custom_entropy.py     Demo: EP con familia de entropía elegible
     ├── s_main_v2_all.py             Demo: ranking + toy-sample
     ├── datos_chicos_test.py         Test: EP vs Newton-KKT (validación)
-    ├── ReturnsDistribution.mat      Base de datos de Meucci (100k escenarios)
-    ├── ReturnsDistributionShort.mat  Versión reducida (1k escenarios)
-    ├── input_mkt_px.xlsx            Precios panel líder Merval
-    └── input_mkt_w.xlsx             Weights del Merval al 22/sep/2025
+    ├── reproduce_paper.py           Corre todos los pasos del paper
+    ├── tests/                       Pruebas de propiedades del solver
+    ├── data/dataacciones/           Precios y ponderaciones del panel líder
+    ├── data/databonos/              Rendimientos, duration y convexidad
+    ├── results/                     Salida de cada paso
+    ├── ReturnsDistributionShort.mat Base de Meucci reducida (1k escenarios)
+    └── octave-matlab-versions/      Código de Meucci (2008) y su extensión
+                                     (incluye ReturnsDistribution.mat, 100k)
 """
 
 # =================================================================
@@ -34,9 +44,15 @@ probabilidades del prior p ∈ R^J, las matrices de constraints de
 desigualdad (A, b) e igualdad (Aeq, beq), la familia de entropía y el
 parámetro q, y devuelve el posterior p̃ ∈ R^J que minimiza la
 q-divergencia relativa sujeto a las restricciones, junto con la función
-Lagrangiana evaluada en el óptimo y el vector de multiplicadores. La
-resolución se realiza en el espacio dual mediante L-BFGS-B (para
-q ≥ 1) o Newton-Raphson multivariado (para q < 1). Para las familias
+Lagrangiana evaluada en el óptimo y el vector de multiplicadores. Para
+q ≥ 1 la resolución se realiza en el espacio dual, con cada restricción
+escalada por su dispersión bajo el prior, mediante L-BFGS-B (o BFGS si
+solo hay igualdades); para Shannon y Tsallis sigue un refinamiento de
+Newton sobre el conjunto activo, y la solución se acepta solo si cumple
+las condiciones KKT, de modo que un conjunto de views incompatible
+produce un error explícito. Para q < 1 se usa Newton-Raphson
+multivariado, solo con views de igualdad y en problemas chicos. Para las
+familias
 Rényi y General, donde el posterior no admite despeje explícito, se
 emplea un método de punto fijo con iteración de Mann y arranque desde
 la solución de Tsallis. El módulo incluye además las funciones
@@ -84,7 +100,7 @@ clásico de Meucci (2008) minimizando la divergencia de Kullback-Leibler
 (Shannon) para obtener el posterior p̃, del cual se extraen los momentos
 y se optimiza la cartera. La función run_q_tsallis_ep() extiende el EP
 utilizando la q-divergencia de Tsallis con q parametrizable (por
-defecto q = 2, el valor óptimo demostrado en este trabajo). Los tres
+defecto q = 2, la divergencia chi-cuadrado de Pearson). Los tres
 modelos reciben como inputs los retornos históricos, la covarianza, los
 weights del benchmark y los views traducidos, y devuelven un objeto
 ModelResult que contiene los pesos óptimos, los retornos esperados
@@ -96,17 +112,18 @@ impone un límite máximo de concentración por activo.
 
 4. s_main_merval.py — Aplicación empírica con el Merval
 
-Script principal que ejecuta la comparación empírica de los tres modelos
-sobre el panel líder del índice Merval. Carga los precios históricos
-(input_mkt_px.xlsx) y los weights de mercado (input_mkt_w.xlsx), calcula
-retornos (logarítmicos, simples o delta para yields de bonos), define
-los views del portfolio manager (ranking de energéticas y underweight en
-bancos), y ejecuta secuencialmente Black-Litterman, EP-Shannon y
-q-Tsallis-EP. Los resultados se presentan en tablas comparativas
-impresas en consola, gráficos PNG de cuatro paneles (pesos, fronteras,
-retornos, métricas de riesgo), y archivos Excel con tres hojas (pesos
-óptimos, retornos esperados, medidas de riesgo) listos para incluir en
-el documento.
+Script principal de la aplicación al panel líder del índice Merval.
+Carga los precios históricos y los weights de mercado
+(data/dataacciones/), calcula retornos (simples o logarítmicos) y define
+los views del portfolio manager (ranking de energéticas y energéticas
+contra bancos). Las carteras siguen un diseño de dos priors (equilibrio,
+Π = δΣw_mkt, e histórico) por cuatro reglas (sin views, Black-Litterman,
+EP-Shannon y q-Tsallis-EP), más dos carteras de control (1/N y mínima
+varianza). El diseño permite separar el efecto del prior del efecto de
+los views y del de la regla de actualización. Los resultados se
+presentan en tablas impresas en consola, un gráfico PNG y archivos en
+results/ (ponderaciones, diagnósticos de los views y Excel con pesos,
+retornos esperados y medidas de riesgo).
 
 
 5. s_main_optimal_q.py — Determinación del q óptimo
@@ -121,8 +138,10 @@ sweep_q_random_seeds() que repite el barrido con múltiples semillas
 para verificar robustez. El script genera tablas de resultados, la
 validación cruzada contra los valores de referencia de GNU Octave, y
 tres gráficos (barrido completo, zoom del óptimo, robustez con
-semillas). Los resultados demuestran que q = 2 (entropía de colisión)
-minimiza consistentemente la distancia del posterior al prior.
+semillas). En todas las corridas el mínimo de la distancia euclídea se
+alcanza en q = 2. Con prior uniforme ese resultado vale por construcción
+(q = 2 es la proyección euclídea del prior sobre los views), de modo que
+el barrido funciona como verificación de la implementación.
 
 
 6. s_main_custom_entropy.py — Demostración de EP con entropía elegible
@@ -151,6 +170,24 @@ diferencias finitas. Se utiliza un problema de dimensión reducida
 (J = 4 escenarios) con constraints de igualdad y desigualdad, y se
 verifica la coincidencia para las tres familias: Shannon, Tsallis
 (q = 1.5) y Rényi (q = 1.5).
+
+
+9. Módulos y scripts restantes
+
+covariance_estimation.py calcula retornos y covarianzas cuando el panel
+está desbalanceado (covarianza por pares y proyección a la matriz de
+correlación más cercana, Higham 2002). portfolio_evolution.py evalúa las
+carteras fuera de muestra (buy-and-hold o rebalanceo diario), calcula
+las métricas y los intervalos bootstrap por bloques de las diferencias
+de Sharpe. s_main_qep_vs_ep.py compara EP y q-EP ante views cada vez
+más exigentes (números efectivos de escenarios, escenarios en cero,
+CVaR y variabilidad entre remuestras). s_main_merval_robustez.py repite
+la aplicación cambiando de a un supuesto por vez.
+s_main_verificaciones.py reúne las comprobaciones numéricas que cita el
+paper. s_main_bonds.py aplica el esquema a bonos, pasando de variaciones
+de rendimiento a retornos de precio con duration y convexidad.
+reproduce_paper.py corre todos los pasos y paper/build_tables.py genera
+las tablas y los números del texto a partir de results/.
 """
 
 # =================================================================

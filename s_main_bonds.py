@@ -59,6 +59,8 @@ import matplotlib.pyplot as plt
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+DATA_DIR = HERE / "data" / "databonos"
+RESULTS_DIR = HERE / "results"
 
 from views_config import (
     ViewSpec, build_views,
@@ -527,12 +529,13 @@ def run_bond_pipeline(
     all_results_with_bench = [bench_result] + list(results.values())
     print_model_comparison(all_results_with_bench, tickers, w_mkt)
 
-    plot_path = HERE / "model_comparison_bonds.png"
+    RESULTS_DIR.mkdir(exist_ok=True)
+    plot_path = RESULTS_DIR / "model_comparison_bonds.png"
     plot_model_comparison(list(results.values()), tickers, w_mkt,
                           save_path=str(plot_path), bench_result=bench_result)
 
     # ── Exportar a Excel ──
-    excel_path = HERE / "resultados_bonds.xlsx"
+    excel_path = RESULTS_DIR / "resultados_bonds.xlsx"
     _export_bond_results(results, tickers, w_mkt, duration_df, str(excel_path),
                          bench_risk=risk_bench)
 
@@ -698,9 +701,9 @@ if __name__ == "__main__":
     print(f"  Duration mode: {DURATION_MODE}")
     print("=" * 70)
 
-    yields_path = HERE / "input_mkt_px.xlsx"
-    weights_path = HERE / "input_mkt_w.xlsx"
-    stats_path = HERE / "input_bond_stats.xlsx"
+    yields_path = DATA_DIR / "input_mkt_px.xlsx"
+    weights_path = DATA_DIR / "input_mkt_w.xlsx"
+    stats_path = DATA_DIR / "input_bond_stats.xlsx"
 
     for fp, desc in [
         (yields_path, "yields"),

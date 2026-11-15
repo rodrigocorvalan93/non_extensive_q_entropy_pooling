@@ -1,0 +1,11 @@
+,l1_vs_benchmark
+Benchmark,0.000000
+BL,0.545000
+EP-eq,0.357430
+qEP-eq,0.355538
+MV-hist,1.304468
+BL-hist,1.089340
+EP,1.157615
+qEP,1.157652
+1/N,0.687565
+MinVar,1.531809

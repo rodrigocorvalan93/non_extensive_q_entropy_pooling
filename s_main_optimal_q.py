@@ -14,7 +14,9 @@ El criterio: entre distintos posteriores que satisfacen las restricciones del vi
 se prefiere aquel que difiera MENOS del prior (menor error relativo), ya que el view
 pone en tensión las suposiciones previas sin necesidad de alejarse más de lo necesario.
 
-Resultado esperado: q_óptimo ≈ 2.0 (entropía de colisión de Tsallis/Rényi).
+Resultado esperado: q_óptimo ≈ 2.0. Con prior uniforme, q = 2 es por construcción la
+proyección euclídea del prior sobre los views, así que el barrido sirve como verificación
+del código (ver la Sección 4 del paper).
 
 Requisitos:
   - entropy_pooling_v2.py (en la misma carpeta o en sys.path)
@@ -600,7 +602,9 @@ if __name__ == "__main__":
 
     # ── Cargar datos ──
     # Busca los .mat en el mismo directorio del script
-    mat_large = HERE / "ReturnsDistribution.mat"
+    mat_large = HERE / "octave-matlab-versions" / "ReturnsDistribution.mat"
+    if not mat_large.exists():
+        mat_large = HERE / "ReturnsDistribution.mat"
     mat_short = HERE / "ReturnsDistributionShort.mat"
 
     if mat_large.exists():
@@ -696,7 +700,9 @@ if __name__ == "__main__":
     print(f"  Ambos coinciden: q* = 2.0")
 
     # ── Gráficos (se guardan junto al script) ──
-    output_path = HERE / "optimal_q_tsallis.png"
+    RESULTS_DIR = HERE / "results"
+    RESULTS_DIR.mkdir(exist_ok=True)
+    output_path = RESULTS_DIR / "optimal_q_tsallis.png"
     fig = plot_optimal_q(
         q_vals, errors, err_clasico, q_opt,
         save_path=str(output_path),
@@ -721,7 +727,7 @@ if __name__ == "__main__":
         ax2.legend(fontsize=10)
         ax2.grid(True, alpha=0.3)
         fig2.tight_layout()
-        zoom_path = HERE / "optimal_q_zoom.png"
+        zoom_path = RESULTS_DIR / "optimal_q_zoom.png"
         fig2.savefig(str(zoom_path), dpi=150, bbox_inches="tight")
         print(f"\nGráfico zoom guardado en: {zoom_path}")
 
@@ -738,7 +744,7 @@ if __name__ == "__main__":
         verbose=True,
     )
 
-    seeds_path = HERE / "optimal_q_random_seeds.png"
+    seeds_path = RESULTS_DIR / "optimal_q_random_seeds.png"
     plot_random_seeds(random_results, save_path=str(seeds_path))
 
     # ── Tabla detallada: error por q para cada seed ──

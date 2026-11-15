@@ -119,10 +119,20 @@ def _fill_short_gaps(serie: pd.Series, max_gap: int) -> pd.Series:
     pd.Series
         Serie con huecos cortos rellenados.
     """
-    # interpolate con limit rellena como máximo `limit` NaN consecutivos
-    rellena = serie.interpolate(method="linear", limit=max_gap)
-    # ffill para el caso de que el último dato sea NaN (máx `max_gap` días)
-    rellena = rellena.ffill(limit=max_gap)
+    isna = serie.isna()
+    if not isna.any():
+        return serie
+    # Largo de cada racha de NaN consecutivos. Se rellenan ENTERAS las rachas
+    # de hasta `max_gap` días y se dejan intactas las más largas (con
+    # interpolate(limit=N) se rellenaban los primeros N días de un hueco
+    # largo, que es justo lo que no se quiere).
+    racha = (isna != isna.shift()).cumsum()
+    largo = isna.groupby(racha).transform("size")
+    corto = isna & (largo <= max_gap)
+    # interior: interpolación lineal; racha final: último dato disponible
+    interp = serie.interpolate(method="linear", limit_area="inside").ffill()
+    rellena = serie.copy()
+    rellena[corto] = interp[corto]
     return rellena
 
 

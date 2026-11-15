@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "Si usás este código, por favor citá el documento de trabajo."
+title: "Non-Extensive Entropy Pooling: Integrating the Portfolio Manager's Views into Non-Gaussian Markets"
+type: software
+authors:
+  - family-names: "Corvalán Salguero"
+    given-names: "Rodrigo"
+    affiliation: "Universidad Torcuato Di Tella; Universidad de Buenos Aires"
+repository-code: "https://github.com/rodrigocorvalan93/non_extensive_q_entropy_pooling"
+date-released: "2026-11-14"
+preferred-citation:
+  type: report
+  title: "Non-Extensive Entropy Pooling: Integrating the Portfolio Manager's Views into Non-Gaussian Markets"
+  authors:
+    - family-names: "Corvalán Salguero"
+      given-names: "Rodrigo"
+  year: 2026
+  institution:
+    name: "Working paper"

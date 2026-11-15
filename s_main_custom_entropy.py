@@ -61,7 +61,9 @@ def matlab_to_python(idxs, N):
 # 2) Load X y p
 # -----------------------------
 HERE = Path(__file__).resolve().parent
-mat_path = HERE / "ReturnsDistribution.mat"
+mat_path = HERE / "octave-matlab-versions" / "ReturnsDistribution.mat"
+if not mat_path.exists():
+    mat_path = HERE / "ReturnsDistribution.mat"
 mat = loadmat(mat_path)
 
 X = np.asarray(mat["X"], dtype=float)
